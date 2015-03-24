@@ -481,7 +481,7 @@ static void prepare_pcap(void) {
     if (!use_iface) {
 
       /* See the earlier note on libpcap SEGV - same problem here.
-         Also, this retusns something stupid on Windows, but hey... */
+         Also, this returns something stupid on Windows, but hey... */
      
       if (!access("/sys/class/net", R_OK | X_OK) || errno == ENOENT)
         use_iface = (u8*)pcap_lookupdev(pcap_err);
@@ -510,10 +510,10 @@ static void prepare_pcap(void) {
 
 #else 
 
-    /* PCAP timeouts tend to be broken, so we'll use a minimum value
+    /* PCAP timeouts tend to be broken, so we'll use a very small value
        and rely on select() instead. */
 
-    pt = pcap_open_live((char*)use_iface, SNAPLEN, set_promisc, 1, pcap_err);
+    pt = pcap_open_live((char*)use_iface, SNAPLEN, set_promisc, 5, pcap_err);
 
 #endif /* ^__CYGWIN__ */
 
@@ -805,12 +805,15 @@ static void live_event_loop(void) {
     s32 pret, i;
     u32 cur;
 
-    /* We use a 250 ms timeout to keep Ctrl-C responsive without resortng to
-       silly sigaction hackery or unsafe signal handler code. */
+    /* We had a 250 ms timeout to keep Ctrl-C responsive without resortng
+       to silly sigaction hackery or unsafe signal handler code. Unfortunately,
+       if poll() timeout is much longer than pcap timeout, we end up with
+       dropped packets on VMs. Seems like a kernel bug, but for now, this
+       loop is a bit busier than it needs to be... */
 
 poll_again:
 
-    pret = poll(pfds, pfd_count, 250);
+    pret = poll(pfds, pfd_count, 10);
 
     if (pret < 0) {
       if (errno == EINTR) break;
@@ -822,6 +825,30 @@ poll_again:
     /* Examine pfds... */
 
     for (cur = 0; cur < pfd_count; cur++) {
+
+      if (pfds[cur].revents & (POLLERR | POLLHUP)) switch (cur) {
+
+        case 0:
+
+          FATAL("Packet capture interface is down.");
+
+        case 1:
+
+          FATAL("API socket is down.");
+
+        default:
+
+          /* Shut down API connection and free its state. */
+
+          DEBUG("[#] API connection on fd %d closed.\n", pfds[cur].fd);
+
+          close(pfds[cur].fd);
+          ctable[cur]->fd = -1;
+ 
+          pfd_count = regen_pfds(pfds, ctable);
+          goto poll_again;
+
+      }
 
       if (pfds[cur].revents & POLLOUT) switch (cur) {
 
@@ -928,29 +955,6 @@ poll_again:
 
       }
 
-      if (pfds[cur].revents & (POLLERR | POLLHUP)) switch (cur) {
-
-        case 0:
-
-          FATAL("Packet capture interface is down.");
-
-        case 1:
-
-          FATAL("API socket is down.");
-
-        default:
-
-          /* Shut down API connection and free its state. */
-
-          DEBUG("[#] API connection on fd %d closed.\n", pfds[cur].fd);
-
-          close(pfds[cur].fd);
-          ctable[cur]->fd = -1;
- 
-          pfd_count = regen_pfds(pfds, ctable);
-          goto poll_again;
-
-      }
 
       /* Processed all reported updates already? If so, bail out early. */
 
@@ -1099,7 +1103,7 @@ int main(int argc, char** argv) {
     case 'p':
     
       if (set_promisc)
-        FATAL("Even more promiscuous? People will call me slutty!");
+        FATAL("Even more promiscuous? People will start talking!");
 
       set_promisc = 1;
       break;
